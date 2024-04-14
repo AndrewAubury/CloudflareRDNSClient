@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -41,7 +40,7 @@ func main() {
 	flag.Parse()
 
 	config := Config{}
-	configFile, err := ioutil.ReadFile(*configPath)
+	configFile, err := os.ReadFile(*configPath)
 	if err != nil {
 		fmt.Println("Error reading config file:", err)
 		os.Exit(1)
