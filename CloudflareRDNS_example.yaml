@@ -1,0 +1,4 @@
+api_token: YOUR_API_TOKEN
+email: YOUR_EMAIL
+key: YOUR_API_KEY
+use_token: true  # set to false to use email and key instead of token
