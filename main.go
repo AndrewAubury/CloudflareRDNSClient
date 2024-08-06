@@ -165,7 +165,7 @@ func SOAArpaLookup(domain string) (string, error) {
 	defer conn.Close()
 
 	// Set a timeout for the connection
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	// Send the DNS query
 	_, err = conn.Write(packedMsg)
