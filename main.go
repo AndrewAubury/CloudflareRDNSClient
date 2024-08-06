@@ -9,8 +9,10 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/cloudflare/cloudflare-go"
+	"golang.org/x/net/dns/dnsmessage"
 	"gopkg.in/yaml.v2"
 )
 
@@ -104,25 +106,123 @@ func getArpaZone(ip string) (string, error) {
 	// Parse the IP address to ensure it is valid
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
-		sendOutput(false, "Error to get rDNS Zone", "Invalid IP address")
+		sendOutput(false, "Error to get rDNS Zone", "Invalid IP address INT")
 		return "", nil
 	}
 
-	// Extract the first three octets for a /24 network
-	octets := strings.Split(ip, ".")
-	if len(octets) != 4 {
+	ipAddr := net.ParseIP(ip)
+	if ipAddr == nil {
 		sendOutput(false, "Error to get rDNS Zone", "Invalid IP address")
 		return "", fmt.Errorf("invalid IP address format")
 	}
 
+	var arpa string
+	if strings.Contains(ip, ":") {
+		// IPv6 address
+		if strings.Count(ip, ":") < 2 || strings.Count(ip, ":") > 7 {
+			sendOutput(false, "Error to get rDNS Zone", "Invalid IPv6 address format")
+			return "", fmt.Errorf("invalid IPv6 address format")
+		}
+		arpa = getIPv6Arpa(ipAddr)
+	} else {
+		// IPv4 address
+		octets := strings.Split(ip, ".")
+		if len(octets) != 4 {
+			sendOutput(false, "Error to get rDNS Zone", "Invalid IP address OCT")
+			return "", fmt.Errorf("invalid IPv4 address format")
+		}
+		arpa = fmt.Sprintf("%s.%s.%s.%s.in-addr.arpa", octets[3], octets[2], octets[1], octets[0])
+
+	}
+
 	// Reverse the order of the first three octets
-	reversedOctets := fmt.Sprintf("%s.%s.%s.in-addr.arpa", octets[2], octets[1], octets[0])
-	return reversedOctets, nil
+	return arpa, nil
+}
+
+func SOAArpaLookup(domain string) (string, error) {
+	// Create a DNS message
+	var msg dnsmessage.Message
+	msg.Header.RecursionDesired = true
+	msg.Questions = []dnsmessage.Question{
+		{
+			Name:  dnsmessage.MustNewName(domain + "."),
+			Type:  dnsmessage.TypeSOA,
+			Class: dnsmessage.ClassINET,
+		},
+	}
+
+	// Pack the DNS message
+	packedMsg, err := msg.Pack()
+	if err != nil {
+		return "", fmt.Errorf("failed to pack DNS message: %v", err)
+	}
+
+	// Set up a connection to the DNS server
+	conn, err := net.Dial("udp", "1.1.1.1:53")
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to DNS server: %v", err)
+	}
+	defer conn.Close()
+
+	// Set a timeout for the connection
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Send the DNS query
+	_, err = conn.Write(packedMsg)
+	if err != nil {
+		return "", fmt.Errorf("failed to send DNS query: %v", err)
+	}
+
+	// Receive the DNS response
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return "", fmt.Errorf("failed to read DNS response: %v", err)
+	}
+
+	// Unpack the DNS response
+	var response dnsmessage.Message
+	err = response.Unpack(buf[:n])
+	if err != nil {
+		return "", fmt.Errorf("failed to unpack DNS response: %v", err)
+	}
+
+	// Extract the SOA record from the Answers or Authority section
+	for _, rr := range append(response.Answers, response.Authorities...) {
+		return strings.TrimRight(rr.Header.Name.String(), "."), nil
+	}
+
+	return "", fmt.Errorf("no SOA record found")
+}
+
+func getIPv6Arpa(ipAddr net.IP) string {
+	// Convert IP to 16-byte representation
+	ipv6 := ipAddr.To16()
+	hexDigits := "0123456789abcdef"
+	var arpaBuilder strings.Builder
+
+	for i := len(ipv6) - 1; i >= 0; i-- {
+		b := ipv6[i]
+		// Append each half-byte (nibble) in reverse order
+		arpaBuilder.WriteByte(hexDigits[b&0xF])
+		arpaBuilder.WriteByte('.')
+		arpaBuilder.WriteByte(hexDigits[b>>4])
+		arpaBuilder.WriteByte('.')
+	}
+
+	arpaBuilder.WriteString("ip6.arpa")
+	return arpaBuilder.String()
 }
 
 func getCloudflareZone(api *cloudflare.API, ip string) string {
 	arpa, _ := getArpaZone(ip)
-	zoneID, err := api.ZoneIDByName(arpa)
+	// arpa = arpa
+	// Define the domain for which you want to perform the SOA DNS lookup
+	// Create a DNS message
+	zonedArpa, _ := SOAArpaLookup(arpa)
+	//fmt.Printf("We got zone %s from authoritive server via 1.1.1.1", zonedArpa)
+	zoneID, err := api.ZoneIDByName(zonedArpa)
+
 	if err != nil {
 		sendOutput(false, "Error to get rDNS Zone", err.Error())
 		return ""
@@ -133,9 +233,11 @@ func getCloudflareZone(api *cloudflare.API, ip string) string {
 func getRDNS(api *cloudflare.API, ip string) (string, error) {
 	// Dummy implementation, replace with actual Cloudflare API call
 	zoneID := getCloudflareZone(api, ip)
-	octets := strings.Split(ip, ".")
+	//	octets := strings.Split(ip, ".")
 	arpa, _ := getArpaZone(ip)
-	records, _, err := api.ListDNSRecords(context.Background(), cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{Name: octets[3] + "." + arpa})
+
+	records, _, err := api.ListDNSRecords(context.Background(), cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{Name: arpa})
+	//records, _, err := api.ListDNSRecords(context.Background(), cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{})
 	// Fetch DNS records according to the criteria
 	if err != nil {
 		fmt.Println("Error fetching DNS records:", err)
@@ -144,7 +246,7 @@ func getRDNS(api *cloudflare.API, ip string) (string, error) {
 
 	// Check if any records are returned and print them
 	if len(records) == 0 {
-		sendOutput(true, "", "No PTR record found for IP")
+		sendOutput(false, "", "No PTR record found for IP")
 	} else {
 		for _, record := range records {
 			sendOutput(true, record.Content, record.Name)
@@ -158,9 +260,8 @@ func getRDNS(api *cloudflare.API, ip string) (string, error) {
 func updateRDNS(api *cloudflare.API, ip, ptr string) error {
 	// Dummy implementation, replace with actual Cloudflare API call
 	zoneID := getCloudflareZone(api, ip)
-	octets := strings.Split(ip, ".")
 	arpa, _ := getArpaZone(ip)
-	records, _, err := api.ListDNSRecords(context.Background(), cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{Name: octets[3] + "." + arpa})
+	records, _, err := api.ListDNSRecords(context.Background(), cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{Name: arpa})
 	// Fetch DNS records according to the criteria
 	if err != nil {
 		fmt.Println("Error fetching DNS records:", err)
@@ -170,7 +271,7 @@ func updateRDNS(api *cloudflare.API, ip, ptr string) error {
 	// Check if any records are returned and print them
 	if len(records) == 0 {
 		rr := cloudflare.CreateDNSRecordParams{
-			Name:    octets[3] + "." + arpa,
+			Name:    arpa,
 			Type:    "ptr",
 			Content: ptr,
 		}
@@ -247,4 +348,10 @@ func sendOutput(success bool, message string, error string) {
 		return
 	}
 	fmt.Println(output)
+	if success {
+		os.Exit(0)
+	} else {
+		os.Exit(1)
+	}
+
 }
